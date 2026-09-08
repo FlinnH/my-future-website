@@ -1,7 +1,12 @@
 'use client'
 
-import { useEffect, useState, type FormEvent } from 'react'
-import useSWR from 'swr'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from 'react'
 import { Star, Send, Check, Loader2, MessageSquareQuote } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { cn } from '@/lib/utils'
@@ -14,16 +19,14 @@ type Feedback = {
   created_at: string
 }
 
-const supabase = createClient()
+const FEEDBACK_COLUMNS = 'id, name, message, rating, created_at'
 
-async function fetchFeedback(): Promise<Feedback[]> {
-  const { data, error } = await supabase
-    .from('feedback')
-    .select('id, name, message, rating, created_at')
-    .order('created_at', { ascending: false })
-
-  if (error) throw error
-  return (data as Feedback[]) ?? []
+/** Newest first, de-duplicated by id (our own insert also arrives via realtime). */
+function mergeFeedback(list: Feedback[], row: Feedback) {
+  return [row, ...list.filter((f) => f.id !== row.id)].sort(
+    (a, b) =>
+      new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  )
 }
 
 function formatDate(iso: string) {
@@ -87,7 +90,13 @@ function Stars({
 }
 
 export function FeedbackSection() {
-  const { data: feedback = [], isLoading, mutate } = useSWR('feedback', fetchFeedback)
+  // Created inside the component so the browser client is never built during
+  // the server prerender of this client component.
+  const supabase = useMemo(() => createClient(), [])
+
+  const [feedback, setFeedback] = useState<Feedback[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [loadError, setLoadError] = useState(false)
 
   const [name, setName] = useState('')
   const [message, setMessage] = useState('')
@@ -96,15 +105,47 @@ export function FeedbackSection() {
   const [sent, setSent] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Live updates: refresh the list whenever a row is inserted.
+  const addFeedback = useCallback((row: Feedback) => {
+    setFeedback((current) => mergeFeedback(current, row))
+  }, [])
+
+  // Load existing feedback on mount, newest first.
+  useEffect(() => {
+    let active = true
+
+    async function load() {
+      const { data, error: selectError } = await supabase
+        .from('feedback')
+        .select(FEEDBACK_COLUMNS)
+        .order('created_at', { ascending: false })
+
+      if (!active) return
+
+      if (selectError) {
+        setLoadError(true)
+      } else {
+        setFeedback((data as Feedback[]) ?? [])
+      }
+
+      setIsLoading(false)
+    }
+
+    load()
+
+    return () => {
+      active = false
+    }
+  }, [supabase])
+
+  // Live updates: other visitors' submissions appear without a refresh.
   useEffect(() => {
     const channel = supabase
       .channel('feedback-inserts')
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'feedback' },
-        () => {
-          mutate()
+        (payload: { new: Feedback }) => {
+          addFeedback(payload.new)
         },
       )
       .subscribe()
@@ -112,7 +153,7 @@ export function FeedbackSection() {
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [mutate])
+  }, [supabase, addFeedback])
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -128,21 +169,19 @@ export function FeedbackSection() {
     const { data, error: insertError } = await supabase
       .from('feedback')
       .insert({ name: name.trim(), message: message.trim(), rating })
-      .select('id, name, message, rating, created_at')
+      .select(FEEDBACK_COLUMNS)
       .single()
 
     setSubmitting(false)
 
-    if (insertError) {
+    if (insertError || !data) {
       setError('Something went wrong. Please try again.')
       return
     }
 
     // Show the new feedback immediately.
-    mutate((current = []) => {
-      const next = current.filter((f) => f.id !== (data as Feedback).id)
-      return [data as Feedback, ...next]
-    }, false)
+    addFeedback(data as Feedback)
+    setLoadError(false)
 
     setName('')
     setMessage('')
@@ -269,6 +308,14 @@ export function FeedbackSection() {
               <div className="flex items-center gap-2 rounded-2xl border border-border bg-card p-8 text-sm text-muted-foreground">
                 <Loader2 className="size-4 animate-spin" />
                 Loading feedback…
+              </div>
+            ) : loadError && feedback.length === 0 ? (
+              <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border bg-card/50 p-10 text-center">
+                <MessageSquareQuote className="size-8 text-muted-foreground/50" />
+                <p className="text-sm text-muted-foreground">
+                  Couldn&apos;t load feedback right now — your note will still
+                  send.
+                </p>
               </div>
             ) : feedback.length === 0 ? (
               <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border bg-card/50 p-10 text-center">
