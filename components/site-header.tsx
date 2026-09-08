@@ -8,7 +8,7 @@ const NAV = [
   { label: 'About', href: '#about' },
   { label: 'Projects', href: '#projects' },
   { label: 'Skills', href: '#skills' },
-  { label: 'Contact', href: '#contact' },
+  { label: 'Feedback', href: '#feedback' },
 ]
 
 export function SiteHeader() {
@@ -38,10 +38,10 @@ export function SiteHeader() {
             </a>
           ))}
           <a
-            href="#contact"
+            href="#feedback"
             className="rounded-full bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90"
           >
-            Say hello
+            Leave feedback
           </a>
         </nav>
 
